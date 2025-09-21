@@ -1,10 +1,13 @@
+use serde::{Deserialize, Serialize};
+
 pub type Account = String;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tx {
-    from: Account,
-    to: Account,
-    value: u64,
-    data: String,
+    pub from: Account,
+    pub to: Account,
+    pub value: u64,
+    pub data: String,
 }
 
 impl Tx {
