@@ -1,3 +1,4 @@
+pub mod block;
 pub mod cmd;
 pub mod genesis;
 pub mod state;

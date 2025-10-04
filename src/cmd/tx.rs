@@ -51,6 +51,6 @@ impl TxCommand {
             panic!("cannot persist tx: {e:?}");
         }
 
-        println!("snapshot {}", hex::encode(state.latest_snapshopt()));
+        println!("snapshot {}", hex::encode(state.latest_block_hash()));
     }
 }

@@ -24,7 +24,7 @@ impl BalanceCommand {
         };
         println!(
             "Accounts balances at {:?}:\n",
-            hex::encode(state.latest_snapshopt())
+            hex::encode(state.latest_block_hash())
         );
         state.balances.iter().for_each(|(a, b)| {
             println!("account:{}, balance:{}", a, b);

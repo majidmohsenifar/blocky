@@ -1,25 +1,24 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Read, Seek, Write},
+    io::{BufRead, BufReader, Write},
 };
 
-use sha2::{Digest, Sha256};
+use chrono::Utc;
 
 use crate::{
     BoxError,
+    block::{Block, BlockFs, Hash},
     genesis::Genesis,
     tx::{Account, Tx},
 };
-
-pub type Snapshot = [u8; 32];
 
 #[derive(Debug)]
 pub struct State {
     pub balances: HashMap<Account, u64>,
     pub tx_mempool: Vec<Tx>,
     pub db_file: std::fs::File,
-    pub snapshot: Snapshot,
+    pub latest_block_hash: Hash,
 }
 
 impl State {
@@ -34,22 +33,22 @@ impl State {
             .read(true)
             .append(true)
             .create(true)
-            .open("database/tx.db")?;
+            .open("database/block.db")?;
 
         let mut state = State {
             balances,
             tx_mempool: vec![],
             db_file: db_file.try_clone()?,
-            snapshot: [0; 32],
+            latest_block_hash: [0; 32],
         };
 
         let reader = BufReader::new(db_file);
         for line in reader.lines() {
             let line = line?;
-            let tx = serde_json::from_str(&line)?;
-            state.apply(tx)?;
+            let block_fs: BlockFs = serde_json::from_str(&line)?;
+            state.apply_block(block_fs.value)?;
+            state.latest_block_hash = block_fs.key;
         }
-        state.do_snapshot()?;
         Ok(state)
     }
 
@@ -64,31 +63,62 @@ impl State {
         Ok(())
     }
 
-    pub fn persist(&mut self) -> Result<Snapshot, BoxError> {
-        let tx_mempool = self.tx_mempool.clone();
-        for (i, tx) in tx_mempool.iter().enumerate() {
-            let tx_string = serde_json::to_string(&tx)?;
-            writeln!(self.db_file, "{}", tx_string)?;
-            self.do_snapshot()?;
-            println!("snapshot is {:?}", hex::encode(self.snapshot));
-            self.tx_mempool = tx_mempool[i + 1..].to_vec();
+    pub fn add_block(&mut self, b: Block) -> Result<(), BoxError> {
+        for tx in b.txs {
+            self.add(tx)?;
         }
-        self.do_snapshot()?;
-        Ok(self.snapshot)
-    }
-
-    pub fn latest_snapshopt(&self) -> Snapshot {
-        self.snapshot
-    }
-
-    pub fn do_snapshot(&mut self) -> Result<(), BoxError> {
-        let _ = self.db_file.seek(std::io::SeekFrom::Start(0))?;
-        let mut contents = String::new();
-        self.db_file.read_to_string(&mut contents)?;
-        let hash = Sha256::digest(contents);
-        self.snapshot = hash.into();
         Ok(())
     }
+
+    pub fn persist(&mut self) -> Result<Hash, BoxError> {
+        let block = Block::new(
+            self.latest_block_hash(),
+            Utc::now().timestamp() as u64,
+            &self.tx_mempool,
+        );
+
+        let hash = block.hash()?;
+        let block_fs = BlockFs {
+            key: hash,
+            value: block,
+        };
+
+        let block_fs_json = serde_json::to_string(&block_fs)?;
+
+        println!("persisiting new block to fs");
+        println!("{}", block_fs_json);
+
+        writeln!(self.db_file, "{}", block_fs_json)?;
+        self.latest_block_hash = hash;
+
+        self.tx_mempool = vec![];
+
+        Ok(self.latest_block_hash)
+
+        // let tx_mempool = self.tx_mempool.clone();
+        // for (i, tx) in tx_mempool.iter().enumerate() {
+        //     let tx_string = serde_json::to_string(&tx)?;
+        //     writeln!(self.db_file, "{}", tx_string)?;
+        //     self.do_snapshot()?;
+        //     println!("snapshot is {:?}", hex::encode(self.hash));
+        //     self.tx_mempool = tx_mempool[i + 1..].to_vec();
+        // }
+        // self.do_snapshot()?;
+        // Ok(self.hash)
+    }
+
+    pub fn latest_block_hash(&self) -> Hash {
+        self.latest_block_hash
+    }
+
+    // pub fn do_snapshot(&mut self) -> Result<(), BoxError> {
+    //     let _ = self.db_file.seek(std::io::SeekFrom::Start(0))?;
+    //     let mut contents = String::new();
+    //     self.db_file.read_to_string(&mut contents)?;
+    //     let hash = Sha256::digest(contents);
+    //     self.hash = hash.into();
+    //     Ok(())
+    // }
 
     pub fn apply(&mut self, tx: Tx) -> Result<(), BoxError> {
         if tx.is_reward() {
@@ -111,6 +141,13 @@ impl State {
             .entry(tx.to)
             .and_modify(|b| *b += tx.value)
             .or_insert(tx.value);
+        Ok(())
+    }
+
+    pub fn apply_block(&mut self, b: Block) -> Result<(), BoxError> {
+        for tx in b.txs {
+            self.apply(tx)?;
+        }
         Ok(())
     }
 }

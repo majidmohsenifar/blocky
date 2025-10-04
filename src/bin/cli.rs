@@ -2,6 +2,7 @@ use std::process;
 
 use blocky::cmd::{
     balance::{BalanceCommand, BalanceCommandArgs},
+    migrate::{MigrateCommand, MigrateCommandArgs},
     tx::{TxCommand, TxCommandArgs},
     version::{VersionCommand, VersionCommandArgs},
 };
@@ -22,6 +23,7 @@ enum Command {
     Version,
     Balance,
     Tx,
+    Migrate,
 }
 
 #[tokio::main]
@@ -49,6 +51,11 @@ async fn main() {
             Command::Tx => {
                 let args = TxCommandArgs::parse_from(args_with_prog);
                 let cmd = TxCommand::new();
+                cmd.run(args).await;
+            }
+            Command::Migrate => {
+                let args = MigrateCommandArgs::parse_from(args_with_prog);
+                let cmd = MigrateCommand::new();
                 cmd.run(args).await;
             }
         }
