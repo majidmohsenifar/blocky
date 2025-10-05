@@ -4,6 +4,15 @@ use serde::Deserialize;
 
 use crate::{BoxError, tx::Account};
 
+pub const GENESIS_JSON: &str = r#"
+{
+  "genesis_time": "2019-03-18T00:00:00.000000000Z",
+  "chain_id": "the-blockchain-bar-ledger",
+  "balances": {
+    "andrej": 1000000
+  }
+}"#;
+
 #[derive(Deserialize)]
 pub struct Genesis {
     pub balances: HashMap<Account, u64>,

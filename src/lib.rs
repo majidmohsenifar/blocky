@@ -1,6 +1,8 @@
 pub mod block;
 pub mod cmd;
+pub mod fs;
 pub mod genesis;
+pub mod node;
 pub mod state;
 pub mod tx;
 

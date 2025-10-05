@@ -16,6 +16,8 @@ pub struct TxCommandArgs {
     pub value: u64,
     #[arg(short, long)]
     pub data: Option<String>,
+    #[arg(long)]
+    pub data_dir: String,
 }
 
 #[derive(Default)]
@@ -35,7 +37,7 @@ impl TxCommand {
             args.value,
             args.data.unwrap_or("".to_string()),
         );
-        let state = State::new_state_from_disk();
+        let state = State::new_state_from_disk(&args.data_dir);
         let mut state = match state {
             Err(e) => {
                 panic!("cannot create state {e:?}");

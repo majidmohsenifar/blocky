@@ -5,7 +5,10 @@ use crate::{block::Block, state::State, tx::Tx};
 
 #[derive(Debug, Default, Parser)]
 #[command(flatten_help = true)]
-pub struct MigrateCommandArgs {}
+pub struct MigrateCommandArgs {
+    #[arg(short, long)]
+    pub data_dir: String,
+}
 
 #[derive(Default)]
 pub struct MigrateCommand {}
@@ -15,8 +18,8 @@ impl MigrateCommand {
         Self::default()
     }
 
-    pub async fn run(&self, _args: MigrateCommandArgs) {
-        let state = State::new_state_from_disk();
+    pub async fn run(&self, args: MigrateCommandArgs) {
+        let state = State::new_state_from_disk(&args.data_dir);
         let mut state = match state {
             Err(e) => {
                 panic!("cannot create state {e:?}");

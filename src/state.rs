@@ -9,6 +9,7 @@ use chrono::Utc;
 use crate::{
     BoxError,
     block::{Block, BlockFs, Hash},
+    fs,
     genesis::Genesis,
     tx::{Account, Tx},
 };
@@ -22,8 +23,9 @@ pub struct State {
 }
 
 impl State {
-    pub fn new_state_from_disk() -> Result<State, BoxError> {
-        let genesis = Genesis::new_from_file_path("database/genesis.json")?;
+    pub fn new_state_from_disk(data_dir: &str) -> Result<State, BoxError> {
+        fs::init_data_dir_if_not_exists(data_dir)?;
+        let genesis = Genesis::new_from_file_path(&fs::get_genesis_json_file_path(data_dir))?;
         let mut balances = HashMap::new();
         for (acc, b) in &genesis.balances {
             balances.insert(acc.to_string(), *b);
@@ -33,7 +35,7 @@ impl State {
             .read(true)
             .append(true)
             .create(true)
-            .open("database/block.db")?;
+            .open(fs::get_blocks_db_file_path(data_dir))?;
 
         let mut state = State {
             balances,
@@ -94,31 +96,11 @@ impl State {
         self.tx_mempool = vec![];
 
         Ok(self.latest_block_hash)
-
-        // let tx_mempool = self.tx_mempool.clone();
-        // for (i, tx) in tx_mempool.iter().enumerate() {
-        //     let tx_string = serde_json::to_string(&tx)?;
-        //     writeln!(self.db_file, "{}", tx_string)?;
-        //     self.do_snapshot()?;
-        //     println!("snapshot is {:?}", hex::encode(self.hash));
-        //     self.tx_mempool = tx_mempool[i + 1..].to_vec();
-        // }
-        // self.do_snapshot()?;
-        // Ok(self.hash)
     }
 
     pub fn latest_block_hash(&self) -> Hash {
         self.latest_block_hash
     }
-
-    // pub fn do_snapshot(&mut self) -> Result<(), BoxError> {
-    //     let _ = self.db_file.seek(std::io::SeekFrom::Start(0))?;
-    //     let mut contents = String::new();
-    //     self.db_file.read_to_string(&mut contents)?;
-    //     let hash = Sha256::digest(contents);
-    //     self.hash = hash.into();
-    //     Ok(())
-    // }
 
     pub fn apply(&mut self, tx: Tx) -> Result<(), BoxError> {
         if tx.is_reward() {

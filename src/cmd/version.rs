@@ -7,7 +7,10 @@ const VERBAL: &str = "TX Add && Balances List";
 
 #[derive(Debug, Default, Parser)]
 #[command(flatten_help = true)]
-pub struct VersionCommandArgs {}
+pub struct VersionCommandArgs {
+    #[arg(short, long)]
+    pub data_dir: String,
+}
 
 #[derive(Default)]
 pub struct VersionCommand {}
