@@ -13,15 +13,17 @@ pub struct BlockFs {
     pub value: Block,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
     #[serde(serialize_with = "hash_to_hex", deserialize_with = "hash_from_hex")]
-    parent: Hash,
-    time: u64,
+    pub parent: Hash,
+    #[serde(default)]
+    pub number: u64,
+    pub time: u64,
 }
 
 // Serialization: Hash -> hex string
-fn hash_to_hex<S>(hash: &Hash, serializer: S) -> Result<S::Ok, S::Error>
+pub fn hash_to_hex<S>(hash: &Hash, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -29,7 +31,7 @@ where
 }
 
 // Deserialization: hex string -> Hash
-fn hash_from_hex<'de, D>(deserializer: D) -> Result<Hash, D::Error>
+pub fn hash_from_hex<'de, D>(deserializer: D) -> Result<Hash, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -43,7 +45,7 @@ where
     Ok(hash)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     #[serde(rename = "payload")]
@@ -51,10 +53,11 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(parent_hash: Hash, time: u64, txs: &[Tx]) -> Self {
+    pub fn new(parent_hash: Hash, number: u64, time: u64, txs: &[Tx]) -> Self {
         Self {
             header: BlockHeader {
                 parent: parent_hash,
+                number,
                 time,
             },
             txs: txs.to_vec(),

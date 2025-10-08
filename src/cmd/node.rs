@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use crate::{node::HttpServer, state::State};
+use crate::node::{HttpServer, PeerNode};
 
 #[derive(Debug, Default, Parser)]
 #[command(flatten_help = true)]
@@ -21,15 +21,13 @@ impl NodeCommand {
 
     pub async fn run(&self, args: NodeCommandArgs) {
         let port = args.port.unwrap_or(8080);
-        let state = State::new_state_from_disk(&args.data_dir);
-        let state = match state {
-            Err(e) => {
-                panic!("cannot create state {e:?}");
-            }
-            Ok(s) => s,
+        let bootstrap_node = PeerNode {
+            ip: "127.0.0.1".to_string(),
+            port: 8083, //must be always the known one,
+            is_bootstrap: true,
+            connected: false,
         };
-        println!("running http server on port {}", port);
-        let server = HttpServer::build(state, port).await;
+        let server = HttpServer::build(args.data_dir, port, bootstrap_node).await;
         server.run().await.unwrap()
     }
 }

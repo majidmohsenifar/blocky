@@ -27,7 +27,8 @@ impl MigrateCommand {
             Ok(s) => s,
         };
         let block_0 = Block::new(
-            [0; 32],
+            state.latest_block.header.parent,
+            1,
             Utc::now().timestamp() as u64,
             &[
                 Tx::new(
@@ -44,20 +45,16 @@ impl MigrateCommand {
                 ),
             ],
         );
-        let res = state.add_block(block_0);
-        if let Err(e) = res {
-            panic!("cannot add block_0: {e:?}");
-        }
-        let block_0_hash = state.persist();
-        let block_0_hash = match block_0_hash {
+        let block_0_hash = match state.add_block(block_0) {
             Ok(hash) => hash,
             Err(e) => {
-                panic!("cannot persist block 0: {e:?}");
+                panic!("cannot add block_0: {e:?}");
             }
         };
 
         let block_1 = Block::new(
             block_0_hash,
+            2,
             Utc::now().timestamp() as u64,
             &[
                 Tx::new(
@@ -103,6 +100,5 @@ impl MigrateCommand {
         if let Err(e) = res {
             panic!("cannot add block_1: {e:?}");
         }
-        let _ = state.persist();
     }
 }

@@ -4,7 +4,6 @@ use blocky::cmd::{
     balance::{BalanceCommand, BalanceCommandArgs},
     migrate::{MigrateCommand, MigrateCommandArgs},
     node::{NodeCommand, NodeCommandArgs},
-    tx::{TxCommand, TxCommandArgs},
     version::{VersionCommand, VersionCommandArgs},
 };
 use clap::{Parser, ValueEnum};
@@ -23,7 +22,6 @@ struct Cli {
 enum Command {
     Version,
     Balance,
-    Tx,
     Node,
     Migrate,
 }
@@ -48,11 +46,6 @@ async fn main() {
             Command::Balance => {
                 let args = BalanceCommandArgs::parse_from(args_with_prog);
                 let cmd = BalanceCommand::new();
-                cmd.run(args).await;
-            }
-            Command::Tx => {
-                let args = TxCommandArgs::parse_from(args_with_prog);
-                let cmd = TxCommand::new();
                 cmd.run(args).await;
             }
             Command::Node => {

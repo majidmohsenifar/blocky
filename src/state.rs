@@ -2,24 +2,25 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
+    sync::Arc,
 };
-
-use chrono::Utc;
 
 use crate::{
     BoxError,
-    block::{Block, BlockFs, Hash},
+    block::{Block, BlockFs, BlockHeader, Hash},
     fs,
     genesis::Genesis,
     tx::{Account, Tx},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct State {
     pub balances: HashMap<Account, u64>,
     pub tx_mempool: Vec<Tx>,
-    pub db_file: std::fs::File,
+    pub db_file: Arc<std::fs::File>,
+    pub latest_block: Block,
     pub latest_block_hash: Hash,
+    has_genesis_block: bool,
 }
 
 impl State {
@@ -40,96 +41,124 @@ impl State {
         let mut state = State {
             balances,
             tx_mempool: vec![],
-            db_file: db_file.try_clone()?,
+            db_file: Arc::new(db_file.try_clone()?),
+            latest_block: Block {
+                header: BlockHeader {
+                    parent: [0; 32],
+                    number: 0,
+                    time: 0,
+                },
+                txs: vec![],
+            },
             latest_block_hash: [0; 32],
+            has_genesis_block: false,
         };
 
         let reader = BufReader::new(db_file);
         for line in reader.lines() {
             let line = line?;
             let block_fs: BlockFs = serde_json::from_str(&line)?;
-            state.apply_block(block_fs.value)?;
+
+            apply_txs(&mut state, block_fs.value.clone().txs)?;
+
             state.latest_block_hash = block_fs.key;
+            state.latest_block = block_fs.value;
+            state.has_genesis_block = true;
         }
         Ok(state)
     }
 
-    // pub fn close(&mut self) {
-    //     unimplemented!()
-    //     // let _ = self.db_file;
-    // }
+    pub fn add_block(&mut self, b: Block) -> Result<Hash, BoxError> {
+        let mut state = self.clone();
+        apply_block(&mut state, b.clone())?;
+        let block_hash = b.hash()?;
+        let block_fs = BlockFs {
+            key: block_hash,
+            value: b.clone(),
+        };
+        let block_fs_json = serde_json::to_string(&block_fs)?;
+        writeln!(self.db_file, "{}", block_fs_json)?;
+        self.balances = state.balances;
+        self.latest_block_hash = block_hash;
+        self.latest_block = b;
+        self.has_genesis_block = true;
 
-    pub fn add(&mut self, tx: Tx) -> Result<(), BoxError> {
-        self.apply(tx.clone())?;
-        self.tx_mempool.push(tx);
-        Ok(())
+        Ok(block_hash)
     }
 
-    pub fn add_block(&mut self, b: Block) -> Result<(), BoxError> {
-        for tx in b.txs {
-            self.add(tx)?;
+    pub fn add_blocks(&mut self, blocks: Vec<Block>) -> Result<(), BoxError> {
+        for b in blocks {
+            self.add_block(b)?;
         }
         Ok(())
-    }
-
-    pub fn persist(&mut self) -> Result<Hash, BoxError> {
-        let block = Block::new(
-            self.latest_block_hash(),
-            Utc::now().timestamp() as u64,
-            &self.tx_mempool,
-        );
-
-        let hash = block.hash()?;
-        let block_fs = BlockFs {
-            key: hash,
-            value: block,
-        };
-
-        let block_fs_json = serde_json::to_string(&block_fs)?;
-
-        println!("persisiting new block to fs");
-        println!("{}", block_fs_json);
-
-        writeln!(self.db_file, "{}", block_fs_json)?;
-        self.latest_block_hash = hash;
-
-        self.tx_mempool = vec![];
-
-        Ok(self.latest_block_hash)
     }
 
     pub fn latest_block_hash(&self) -> Hash {
         self.latest_block_hash
     }
 
-    pub fn apply(&mut self, tx: Tx) -> Result<(), BoxError> {
-        if tx.is_reward() {
-            self.balances
-                .entry(tx.to)
-                .and_modify(|b| *b += tx.value)
-                .or_insert(tx.value);
-            return Ok(());
+    pub fn next_block_number(&self) -> u64 {
+        if !self.has_genesis_block {
+            return 0;
         }
+        self.latest_block.header.number + 1
+    }
+}
 
-        if let Some(b) = self.balances.get_mut(&tx.from) {
-            if *b < tx.value {
-                return Err("insufficient balance".into());
-            }
-            *b -= tx.value;
-        } else {
-            return Err("insufficient balance".into());
-        };
-        self.balances
+pub fn apply_block(state: &mut State, b: Block) -> Result<(), BoxError> {
+    let next_expected_block_number = state.latest_block.header.number + 1;
+    if state.has_genesis_block && b.header.number != next_expected_block_number {
+        return Err(format!(
+            "next expected block must be {} not {}",
+            next_expected_block_number, b.header.number
+        )
+        .into());
+    }
+
+    if state.has_genesis_block
+        && state.latest_block.header.number > 0
+        && b.header.parent != state.latest_block_hash()
+    {
+        return Err(format!(
+            "next block parent hash must be {} not {}",
+            hex::encode(state.latest_block_hash),
+            hex::encode(b.header.parent)
+        )
+        .into());
+    }
+    apply_txs(state, b.txs)?;
+    Ok(())
+}
+
+pub fn apply_txs(state: &mut State, txs: Vec<Tx>) -> Result<(), BoxError> {
+    for tx in txs {
+        apply_tx(state, tx)?;
+    }
+    Ok(())
+}
+
+pub fn apply_tx(state: &mut State, tx: Tx) -> Result<(), BoxError> {
+    if tx.is_reward() {
+        state
+            .balances
             .entry(tx.to)
             .and_modify(|b| *b += tx.value)
             .or_insert(tx.value);
-        Ok(())
+        return Ok(());
     }
 
-    pub fn apply_block(&mut self, b: Block) -> Result<(), BoxError> {
-        for tx in b.txs {
-            self.apply(tx)?;
+    if let Some(b) = state.balances.get_mut(&tx.from) {
+        if *b < tx.value {
+            return Err("insufficient balance".into());
         }
-        Ok(())
-    }
+        *b -= tx.value;
+    } else {
+        return Err("insufficient balance".into());
+    };
+    state
+        .balances
+        .entry(tx.to)
+        .and_modify(|b| *b += tx.value)
+        .or_insert(tx.value);
+    Ok(())
 }
