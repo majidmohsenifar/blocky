@@ -1,6 +1,10 @@
 use clap::Parser;
+use tokio::sync::mpsc;
 
-use crate::node::{HttpServer, PeerNode};
+use crate::{
+    node::{HttpServer, Node, PeerNode},
+    state::State,
+};
 
 #[derive(Debug, Default, Parser)]
 #[command(flatten_help = true)]
@@ -8,7 +12,11 @@ pub struct NodeCommandArgs {
     #[arg(short, long)]
     pub data_dir: String,
     #[arg(short, long)]
+    pub ip: String,
+    #[arg(short, long)]
     port: Option<u16>,
+    #[arg(short, long)]
+    miner: String,
 }
 
 #[derive(Default)]
@@ -20,14 +28,37 @@ impl NodeCommand {
     }
 
     pub async fn run(&self, args: NodeCommandArgs) {
-        let port = args.port.unwrap_or(8080);
-        let bootstrap_node = PeerNode {
-            ip: "127.0.0.1".to_string(),
-            port: 8083, //must be always the known one,
-            is_bootstrap: true,
-            connected: false,
+        let state = State::new_state_from_disk(&args.data_dir);
+        let state = match state {
+            Err(e) => {
+                panic!("cannot create state {e:?}");
+            }
+            Ok(s) => s,
         };
-        let server = HttpServer::build(args.data_dir, port, bootstrap_node).await;
-        server.run().await.unwrap()
+        let port = args.port.unwrap_or(8083);
+        let bootstrap_node = PeerNode::new(
+            "127.0.0.1".to_string(),
+            8083, //must be always the known one,
+            true,
+            "andrej".to_string(),
+            false,
+        );
+
+        let (pending_tx_sender, _pending_tx_receiver) = mpsc::channel(100);
+        let (synced_block_sender, _synced_block_receiver) = mpsc::channel(100);
+
+        let node = Node::new(
+            state,
+            args.data_dir,
+            args.ip,
+            port,
+            args.miner,
+            bootstrap_node,
+            pending_tx_sender,
+            synced_block_sender,
+        );
+
+        let server = HttpServer::build(node).await;
+        server.run().await.unwrap();
     }
 }

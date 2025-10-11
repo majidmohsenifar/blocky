@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     BoxError,
-    block::{Block, BlockFs, BlockHeader, Hash},
+    block::{BLOCK_REWARD, Block, BlockFs, BlockHeader, Hash, is_block_hash_valid},
     fs,
     genesis::Genesis,
     tx::{Account, Tx},
@@ -46,7 +46,9 @@ impl State {
                 header: BlockHeader {
                     parent: [0; 32],
                     number: 0,
+                    nonce: 0, //TODO: today is this correct
                     time: 0,
+                    miner: "".to_string(),
                 },
                 txs: vec![],
             },
@@ -126,7 +128,18 @@ pub fn apply_block(state: &mut State, b: Block) -> Result<(), BoxError> {
         )
         .into());
     }
+
+    if !is_block_hash_valid(b.hash()?) {
+        return Err("invalid block hash".into());
+    };
+
     apply_txs(state, b.txs)?;
+
+    state
+        .balances
+        .entry(b.header.miner)
+        .and_modify(|v| *v += BLOCK_REWARD)
+        .or_insert(BLOCK_REWARD);
     Ok(())
 }
 

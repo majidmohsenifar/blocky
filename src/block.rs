@@ -1,10 +1,11 @@
+use crate::tx::Account;
+use crate::{BoxError, tx::Tx};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::{BoxError, tx::Tx};
-
 pub type Hash = [u8; 32];
+pub const BLOCK_REWARD: u64 = 100;
 
 #[derive(Serialize, Deserialize)]
 pub struct BlockFs {
@@ -19,7 +20,9 @@ pub struct BlockHeader {
     pub parent: Hash,
     #[serde(default)]
     pub number: u64,
+    pub nonce: u32,
     pub time: u64,
+    pub miner: Account,
 }
 
 // Serialization: Hash -> hex string
@@ -53,12 +56,21 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(parent_hash: Hash, number: u64, time: u64, txs: &[Tx]) -> Self {
+    pub fn new(
+        parent_hash: Hash,
+        number: u64,
+        nonce: u32,
+        time: u64,
+        miner: Account,
+        txs: &[Tx],
+    ) -> Self {
         Self {
             header: BlockHeader {
                 parent: parent_hash,
                 number,
+                nonce,
                 time,
+                miner,
             },
             txs: txs.to_vec(),
         }
@@ -68,5 +80,28 @@ impl Block {
         let res = serde_json::to_string(self)?;
         let hash = Sha256::digest(res);
         Ok(hash.into())
+    }
+}
+
+pub fn is_block_hash_valid(hash: Hash) -> bool {
+    //TODO: today check if this is correct
+    hash[0] == b'0'
+    // && hash[1] == b'0' && hash[2] == b'0' && hash[3] == b'0'
+    // && hash[4] == b'0'
+    // && hash[5] == b'0'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_block_hash_valid() {
+        let hash_vec =
+            hex::decode("000050e73690810c118ef1f0a09bafcc8bb219a706b40633db2b991a8c573e4f")
+                .unwrap();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&hash_vec);
+        assert!(is_block_hash_valid(hash));
     }
 }

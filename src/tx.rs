@@ -1,4 +1,7 @@
+use crate::block::Hash;
+use axum::BoxError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub type Account = String;
 
@@ -19,6 +22,13 @@ impl Tx {
             data,
         }
     }
+
+    pub fn hash(&self) -> Result<Hash, BoxError> {
+        let res = serde_json::to_string(self)?;
+        let hash = Sha256::digest(res);
+        Ok(hash.into())
+    }
+
     pub fn is_reward(&self) -> bool {
         self.data.as_str() == "reward"
     }

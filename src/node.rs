@@ -1,21 +1,31 @@
 use crate::{
+    BoxError,
     block::{Block, Hash, hash_from_hex, hash_to_hex},
     database,
+    miner::{self, PendingBlock},
     state::State as BlockchainState,
-    tx::Tx,
+    tx::{Account, Tx},
 };
 use axum::{
-    BoxError, Json, Router,
+    Json, Router,
     extract::{Query, Request, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
-use tokio::{io, net::TcpListener, sync::RwLock, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+use tokio::{
+    io,
+    net::TcpListener,
+    sync::{RwLock, mpsc},
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -30,11 +40,28 @@ pub struct PeerNode {
     pub ip: String,
     pub port: u16,
     pub is_bootstrap: bool,
+    pub account: Account,
     // Whenever my node already established connection, sync with this Peer
     pub connected: bool,
 }
 
 impl PeerNode {
+    pub fn new(
+        ip: String,
+        port: u16,
+        is_bootstrap: bool,
+        account: Account,
+        connected: bool,
+    ) -> Self {
+        Self {
+            ip,
+            port,
+            is_bootstrap,
+            account,
+            connected,
+        }
+    }
+
     pub fn tcp_addr(&self) -> String {
         format!("{}:{}", self.ip, self.port)
     }
@@ -46,15 +73,48 @@ pub struct HttpServer {
     shared_state: SharedState,
 }
 
+#[derive(Clone)]
 pub struct Node {
+    state: BlockchainState,
+    info: PeerNode,
     data_dir: String,
     ip: String,
     port: u16,
     known_peers: HashMap<String, PeerNode>,
-    state: BlockchainState,
+    pending_txs: HashMap<String, Tx>,
+    archived_txs: HashMap<String, Tx>,
+    // new_pending_txs: Arc<Mutex<mpsc::Sender<Tx>>>,
+    new_pending_txs: mpsc::Sender<Tx>,
+    // new_synced_blocks: Arc<Mutex<mpsc::Sender<Block>>>,
+    new_synced_blocks: mpsc::Sender<Block>,
 }
 
 impl Node {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        state: BlockchainState,
+        data_dir: String,
+        ip: String,
+        port: u16,
+        account: Account,
+        bootstrap: PeerNode,
+        pending_tx_sender: mpsc::Sender<Tx>,
+        synced_block_sender: mpsc::Sender<Block>,
+    ) -> Self {
+        Node {
+            state,
+            info: PeerNode::new(ip.clone(), port, false, account, true),
+            data_dir,
+            ip,
+            port,
+            known_peers: HashMap::from([(bootstrap.tcp_addr(), bootstrap)]),
+            pending_txs: HashMap::new(),
+            archived_txs: HashMap::new(),
+            new_pending_txs: pending_tx_sender,
+            new_synced_blocks: synced_block_sender,
+        }
+    }
+
     pub async fn sync(&mut self) {
         let peers: Vec<_> = self.known_peers.values().cloned().collect();
         let mut faulty_nodes = vec![];
@@ -142,7 +202,7 @@ impl Node {
 
     pub async fn sync_known_peers(&mut self, known_peers: &[PeerNode]) -> Result<(), BoxError> {
         for p in known_peers {
-            self.add_peer(p).await;
+            self.add_peer(p).await?;
         }
         Ok(())
     }
@@ -185,46 +245,68 @@ impl Node {
             .insert(peer_node.tcp_addr(), peer_node.clone());
         Ok(())
     }
+
+    pub async fn add_pending_tx(&mut self, tx: Tx) -> Result<(), BoxError> {
+        let tx_hash = hex::encode(tx.hash()?);
+        if !self.pending_txs.contains_key(&tx_hash) && self.archived_txs.contains_key(&tx_hash) {
+            self.pending_txs.insert(tx_hash, tx.clone());
+            self.new_pending_txs.send(tx).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn mine(&mut self) -> Result<(), BoxError> {
+        //TODO: today impl later
+        unimplemented!()
+    }
+
+    pub async fn mine_pending_txs(
+        &mut self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), BoxError> {
+        let block_to_mine = PendingBlock::new(
+            self.state.latest_block_hash(),
+            self.state.next_block_number(),
+            self.info.account.clone(),
+            self.pending_txs.values().cloned().collect(),
+        );
+        let mined_block = miner::mine(cancellation_token, block_to_mine).await?;
+        self.remove_mined_pending_txs(&mined_block);
+        self.state.add_block(mined_block)?;
+        Ok(())
+    }
+
+    pub fn remove_mined_pending_txs(&mut self, b: &Block) {
+        let txs_hash: HashSet<String> = b
+            .txs
+            .iter()
+            .map(|tx| hex::encode(tx.hash().unwrap()))
+            .collect();
+        self.pending_txs
+            .retain(|tx_hash, _| !txs_hash.contains(tx_hash));
+    }
 }
 
 impl HttpServer {
-    pub async fn build(data_dir: String, port: u16, bootstrap: PeerNode) -> Self {
-        let blockchain_state = BlockchainState::new_state_from_disk(&data_dir);
-        let blockchain_state = match blockchain_state {
-            Err(e) => {
-                panic!("cannot create state {e:?}");
-            }
-            Ok(s) => s,
-        };
-        println!("running http server on port {}", port);
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+    pub async fn build(node: Node) -> Self {
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", node.port))
             .await
             .unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let ip = listener.local_addr().unwrap().ip().to_string();
 
-        let node = Node {
-            data_dir,
-            ip,
-            port,
-            known_peers: HashMap::from([(
-                format!("{}:{}", bootstrap.ip, bootstrap.port),
-                bootstrap,
-            )]),
-            state: blockchain_state,
-        };
-
-        let node = Arc::new(RwLock::new(node));
-        let node_for_task = node.clone();
+        let mut node_for_sync = node.clone();
+        let mut node_for_mine = node.clone();
         tokio::spawn(async move {
             loop {
-                {
-                    let mut node_guard = node_for_task.write().await;
-                    node_guard.sync().await;
-                }
+                node_for_sync.sync().await;
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
         });
+
+        tokio::spawn(async move {
+            let _ = node_for_mine.mine().await;
+        });
+
+        let node = Arc::new(RwLock::new(node));
         let app_state = AppState { node };
         let shared_state = Arc::new(RwLock::new(app_state));
         let router = get_router(shared_state.clone()).await;
@@ -309,17 +391,8 @@ pub async fn add_tx(State(state): State<SharedState>, req: Request) -> impl Into
     let state = state.read().await;
     let mut node = state.node.write().await;
 
-    let b = Block::new(
-        node.state.latest_block_hash(),
-        node.state.next_block_number(),
-        Utc::now().timestamp() as u64,
-        &[tx],
-    );
-
-    let res = node.state.add_block(b);
-
-    match res {
-        Ok(hash) => (StatusCode::OK, Json(json!({ "hash":hex::encode(hash) }))).into_response(),
+    match node.add_pending_tx(tx).await {
+        Ok(_) => (StatusCode::OK, Json(json!({ "success":true }))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "message":e.to_string()})),
@@ -347,6 +420,7 @@ pub struct StatusRes {
     block_hash: Hash,
     block_number: u64,
     known_peers: Vec<PeerNode>,
+    pending_txs: Vec<Tx>,
 }
 
 pub async fn status(State(state): State<SharedState>, _req: Request) -> impl IntoResponse {
@@ -359,6 +433,7 @@ pub async fn status(State(state): State<SharedState>, _req: Request) -> impl Int
         block_hash: latest_block_hash,
         block_number: latest_block.header.number,
         known_peers: node.known_peers.values().cloned().collect(),
+        pending_txs: node.pending_txs.values().cloned().collect(),
     };
 
     (StatusCode::OK, Json(res)).into_response()
@@ -428,6 +503,7 @@ pub struct AddPeerParams {
     #[serde(default)]
     pub ip: String,
     pub port: u16,
+    pub miner: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -456,6 +532,7 @@ pub async fn add_peer(State(state): State<SharedState>, req: Request) -> impl In
             ip: params.0.ip,
             port: params.0.port,
             is_bootstrap: false,
+            account: params.0.miner,
             connected: true,
         })
         .await;

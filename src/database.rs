@@ -12,7 +12,7 @@ pub async fn get_blocks_after(data_dir: &str, block_hash: Hash) -> Result<Vec<Bl
 
     let reader = BufReader::new(db_file);
     let mut blocks = vec![];
-    for (i, line) in reader.lines().enumerate() {
+    for line in reader.lines() {
         let line = line?;
         let block_fs: BlockFs = serde_json::from_str(&line)?;
 

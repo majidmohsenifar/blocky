@@ -26,4 +26,6 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 chrono = {version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.8"
+tokio-util = "0.7.16"
 
