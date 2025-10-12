@@ -84,11 +84,7 @@ impl Block {
 }
 
 pub fn is_block_hash_valid(hash: Hash) -> bool {
-    //TODO: today check if this is correct
-    hash[0] == b'0'
-    // && hash[1] == b'0' && hash[2] == b'0' && hash[3] == b'0'
-    // && hash[4] == b'0'
-    // && hash[5] == b'0'
+    hash[..4].iter().all(|&byte| byte == 0)
 }
 
 #[cfg(test)]
@@ -98,7 +94,7 @@ mod tests {
     #[test]
     fn test_is_block_hash_valid() {
         let hash_vec =
-            hex::decode("000050e73690810c118ef1f0a09bafcc8bb219a706b40633db2b991a8c573e4f")
+            hex::decode("000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c")
                 .unwrap();
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_vec);

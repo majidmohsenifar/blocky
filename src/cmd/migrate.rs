@@ -46,9 +46,9 @@ impl MigrateCommand {
         );
 
         let (pending_tx_sender, _pending_tx_receiver) = mpsc::channel(100);
-        let (synced_block_sender, _synced_block_receiver) = mpsc::channel(100);
+        let (new_synced_blocks_sender, new_synced_blocks_receiver) = mpsc::channel(100);
 
-        let mut node = Node::new(
+        let node = Node::new_shared_node(
             state,
             args.data_dir,
             args.ip,
@@ -56,7 +56,8 @@ impl MigrateCommand {
             args.miner,
             bootstrap_node,
             pending_tx_sender,
-            synced_block_sender,
+            new_synced_blocks_sender,
+            new_synced_blocks_receiver,
         );
         node.add_pending_tx(Tx::new(
             "andrej".to_string(),

@@ -34,10 +34,11 @@ pub async fn mine(
     cancellation_token: CancellationToken,
     pb: PendingBlock,
 ) -> Result<Block, BoxError> {
-    if pb.txs.len() == 0 {
+    if pb.txs.is_empty() {
         return Err("mining empty blocks is not allowed".into());
     }
 
+    //TODO: today, what if we have new pending tx in the middle of mining
     let mut attempt = 0;
 
     loop {
