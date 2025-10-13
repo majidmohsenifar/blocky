@@ -7,5 +7,6 @@ pub mod miner;
 pub mod node;
 pub mod state;
 pub mod tx;
+pub mod wallet;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

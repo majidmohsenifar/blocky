@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future, sync::Arc};
 use tokio::{
     io,
     net::TcpListener,
@@ -117,6 +117,32 @@ impl Node {
             new_synced_blocks_receiver,
             is_mining: false,
         })))
+    }
+
+    pub async fn mine_pending_txs(
+        &mut self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), BoxError> {
+        let block_to_mine = PendingBlock::new(
+            self.state.latest_block_hash(),
+            self.state.next_block_number(),
+            self.info.account.clone(),
+            self.pending_txs.values().cloned().collect(),
+        );
+        let mined_block = miner::mine(cancellation_token, block_to_mine).await?;
+        self.remove_mined_pending_txs(&mined_block).await;
+        self.state.add_block(mined_block)?;
+        Ok(())
+    }
+
+    pub async fn remove_mined_pending_txs(&mut self, b: &Block) {
+        b.txs.iter().for_each(|tx| {
+            let key = hex::encode(tx.hash().unwrap()); //if we are here the tx_hash is valid, so unwrap is safe
+            let removed_tx = self.pending_txs.remove(&key);
+            if let Some(r_tx) = removed_tx {
+                self.archived_txs.insert(key, r_tx);
+            }
+        });
     }
 }
 
@@ -281,21 +307,22 @@ impl SharedNode {
     }
 
     pub async fn mine(&self, cancellation_token: CancellationToken) -> Result<(), BoxError> {
-        let mut shared_node = self.0.write().await;
         let mut mining_interval = interval(Duration::from_secs(10));
         loop {
             let mining_cancellation_token = CancellationToken::new();
-            let mining_child_cancellation_token = cancellation_token.child_token();
+            let mut shared_node = self.0.write().await;
             select! {
+            biased;
                 _ = cancellation_token.cancelled() => {
                     break;
                 }
+
                 block = shared_node.new_synced_blocks_receiver.recv() =>{
                 match block{
                         Some(b)=>{
                             if shared_node.is_mining{
                                 println!("another peer mined faster");
-                                self.remove_mined_pending_txs(&b).await;
+                                shared_node.remove_mined_pending_txs(&b).await;
                                 mining_cancellation_token.cancel();
                             }
 
@@ -306,49 +333,31 @@ impl SharedNode {
                     }
                 }
                 _ = mining_interval.tick() => {
-                        let self_clone= self.clone();
-                        tokio::spawn(async move {
-                            let mut shared_node = self_clone.0.write().await;
-                            if !shared_node.pending_txs.is_empty()  && !shared_node.is_mining {
-                                shared_node.is_mining = true;
-                                let res = self_clone.mine_pending_txs(mining_child_cancellation_token).await;
-                                if  let Err(e) = res {
-                                    println!("cannot mine pending txs: {}",e);
-                                }
-                                shared_node.is_mining=false;
-                            }
-                        });
+                    let self_clone = self.clone();
+                    let second_self_clone = self.clone();
+                    let cancellation_token_cloned = cancellation_token.clone();
+                    tokio::spawn(async move {
+                        let mut shared_node = self_clone.0.write().await;
+                        if !shared_node.pending_txs.is_empty()  && !shared_node.is_mining {
+                        shared_node.is_mining = true;
+                        let block_to_mine = PendingBlock::new(
+                                shared_node.state.latest_block_hash(),
+                                shared_node.state.next_block_number(),
+                                shared_node.info.account.clone(),
+                                shared_node.pending_txs.values().cloned().collect(),
+                        );
+                        drop(shared_node);
+                        let mined_block = miner::mine(cancellation_token_cloned, block_to_mine).await.unwrap();
+                        let mut shared_node = second_self_clone.0.write().await;
+                        shared_node.remove_mined_pending_txs(&mined_block).await;
+                        shared_node.state.add_block(mined_block).unwrap();
+                        shared_node.is_mining=false;
+                        }
+                   });
                 }
+                    _ = future::ready(()) => {}
             }
         }
-        Ok(())
-    }
-
-    pub async fn remove_mined_pending_txs(&self, b: &Block) {
-        let mut shared_node = self.0.write().await;
-        b.txs.iter().for_each(|tx| {
-            let key = hex::encode(tx.hash().unwrap()); //if we are here the tx_hash is valid, so unwrap is safe
-            let removed_tx = shared_node.pending_txs.remove(&key);
-            if let Some(r_tx) = removed_tx {
-                shared_node.archived_txs.insert(key, r_tx);
-            }
-        });
-    }
-
-    pub async fn mine_pending_txs(
-        &self,
-        cancellation_token: CancellationToken,
-    ) -> Result<(), BoxError> {
-        let mut node = self.0.write().await;
-        let block_to_mine = PendingBlock::new(
-            node.state.latest_block_hash(),
-            node.state.next_block_number(),
-            node.info.account.clone(),
-            node.pending_txs.values().cloned().collect(),
-        );
-        let mined_block = miner::mine(cancellation_token, block_to_mine).await?;
-        self.remove_mined_pending_txs(&mined_block).await;
-        node.state.add_block(mined_block)?;
         Ok(())
     }
 
@@ -356,7 +365,7 @@ impl SharedNode {
         let mut shared_node = self.0.write().await;
         let tx_hash = hex::encode(tx.hash()?);
         if !shared_node.pending_txs.contains_key(&tx_hash)
-            && shared_node.archived_txs.contains_key(&tx_hash)
+            && !shared_node.archived_txs.contains_key(&tx_hash)
         {
             shared_node.pending_txs.insert(tx_hash, tx.clone());
             shared_node.new_pending_txs.send(tx).await?;
