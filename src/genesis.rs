@@ -1,21 +1,22 @@
 use std::collections::HashMap;
 
+use alloy::primitives::Address;
 use serde::Deserialize;
 
-use crate::{BoxError, tx::Account};
+use crate::BoxError;
 
 pub const GENESIS_JSON: &str = r#"
 {
   "genesis_time": "2019-03-18T00:00:00.000000000Z",
   "chain_id": "the-blockchain-bar-ledger",
   "balances": {
-    "andrej": 1000000
+    "0x20a1c88869FC0245E9AdBC76AaBbfcEDFcD08E0F": 1000000
   }
 }"#;
 
 #[derive(Deserialize)]
 pub struct Genesis {
-    pub balances: HashMap<Account, u64>,
+    pub balances: HashMap<Address, u64>,
 }
 
 impl Genesis {

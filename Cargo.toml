@@ -29,5 +29,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rand = "0.8"
 tokio-util = "0.7.16"
 rpassword = "7.4.0"
-alloy = { version = "1.0.38", features = ["signer-keystore"] }
+alloy = { version = "1.0.38", features = ["signers","signer-keystore"] }
 

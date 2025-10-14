@@ -1,4 +1,4 @@
-use alloy::signers::local::{LocalSigner, PrivateKeySigner};
+use alloy::signers::local::LocalSigner;
 use clap::Parser;
 
 use crate::{BoxError, wallet};
@@ -19,24 +19,14 @@ impl WalletCommand {
     }
 
     pub async fn new_account(&self, args: WalletCommandArgs) {
-        let mut rng = rand::thread_rng();
-        let priv_key = PrivateKeySigner::random();
-
         let password = rpassword::prompt_password("Your password: ").unwrap();
         let repeated_password = rpassword::prompt_password("repeat password: ").unwrap();
         if password != repeated_password {
             panic!("password and repeated_password are not the same");
         }
 
-        let _ = LocalSigner::encrypt_keystore(
-            &args.data_dir,
-            &mut rng,
-            priv_key.to_bytes(),
-            password,
-            Some(&wallet::get_keystore_dir_path(&args.data_dir)),
-        )
-        .unwrap();
-        println!("new account created: {}", priv_key.address());
+        let address = wallet::new_keystore_account(&args.data_dir, &password).unwrap();
+        println!("new account created: {}", address);
         println!(
             "saved in: {}",
             wallet::get_keystore_dir_path(&args.data_dir)
@@ -51,7 +41,7 @@ impl WalletCommand {
         }
 
         let res =
-            LocalSigner::decrypt_keystore(&wallet::get_keystore_dir_path(&args.data_dir), password)
+            LocalSigner::decrypt_keystore(wallet::get_keystore_dir_path(&args.data_dir), password)
                 .expect("should have read");
         println!("your address: {}", res.address());
         println!("your privateKey: {}", hex::encode(res.to_bytes()));

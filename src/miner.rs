@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use alloy::primitives::Address;
 use chrono::Utc;
 use tokio::{select, time::sleep};
 use tokio_util::sync::CancellationToken;
@@ -7,19 +8,19 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     BoxError,
     block::{Block, Hash, is_block_hash_valid},
-    tx::{Account, Tx},
+    tx::SignedTx,
 };
 
 pub struct PendingBlock {
     parent: Hash,
     number: u64,
     time: u64,
-    miner: Account,
-    txs: Vec<Tx>,
+    miner: Address,
+    txs: Vec<SignedTx>,
 }
 
 impl PendingBlock {
-    pub fn new(parent: Hash, number: u64, miner: Account, txs: Vec<Tx>) -> Self {
+    pub fn new(parent: Hash, number: u64, miner: Address, txs: Vec<SignedTx>) -> Self {
         Self {
             parent,
             number,
@@ -54,14 +55,7 @@ pub async fn mine(
         if attempt % 100_000 == 0 || attempt == 1 {
             println!("mining {} pending txs, attempt: {attempt}", pb.txs.len());
         }
-        let block = Block::new(
-            pb.parent,
-            pb.number,
-            nonce,
-            pb.time,
-            pb.miner.clone(),
-            &pb.txs,
-        );
+        let block = Block::new(pb.parent, pb.number, nonce, pb.time, pb.miner, &pb.txs);
         let hash = block.hash()?;
         if is_block_hash_valid(hash) {
             return Ok(block);

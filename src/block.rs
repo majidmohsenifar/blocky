@@ -1,5 +1,6 @@
-use crate::tx::Account;
-use crate::{BoxError, tx::Tx};
+use crate::BoxError;
+use crate::tx::SignedTx;
+use alloy::primitives::Address;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,7 @@ pub struct BlockHeader {
     pub number: u64,
     pub nonce: u32,
     pub time: u64,
-    pub miner: Account,
+    pub miner: Address,
 }
 
 // Serialization: Hash -> hex string
@@ -52,7 +53,7 @@ where
 pub struct Block {
     pub header: BlockHeader,
     #[serde(rename = "payload")]
-    pub txs: Vec<Tx>,
+    pub txs: Vec<SignedTx>,
 }
 
 impl Block {
@@ -61,8 +62,8 @@ impl Block {
         number: u64,
         nonce: u32,
         time: u64,
-        miner: Account,
-        txs: &[Tx],
+        miner: Address,
+        txs: &[SignedTx],
     ) -> Self {
         Self {
             header: BlockHeader {

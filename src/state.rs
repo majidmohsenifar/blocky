@@ -5,22 +5,25 @@ use std::{
     sync::Arc,
 };
 
+use alloy::primitives::Address;
+
 use crate::{
     BoxError,
     block::{BLOCK_REWARD, Block, BlockFs, BlockHeader, Hash, is_block_hash_valid},
     fs,
     genesis::Genesis,
-    tx::{Account, Tx},
+    tx::SignedTx,
 };
 
 #[derive(Debug, Clone)]
 pub struct State {
-    pub balances: HashMap<Account, u64>,
-    pub tx_mempool: Vec<Tx>,
+    pub balances: HashMap<Address, u64>,
+    pub account_to_nonces: HashMap<Address, u64>,
+
     pub db_file: Arc<std::fs::File>,
     pub latest_block: Block,
     pub latest_block_hash: Hash,
-    has_genesis_block: bool,
+    pub has_genesis_block: bool,
 }
 
 impl State {
@@ -28,8 +31,8 @@ impl State {
         fs::init_data_dir_if_not_exists(data_dir)?;
         let genesis = Genesis::new_from_file_path(&fs::get_genesis_json_file_path(data_dir))?;
         let mut balances = HashMap::new();
-        for (acc, b) in &genesis.balances {
-            balances.insert(acc.to_string(), *b);
+        for (addr, b) in genesis.balances {
+            balances.insert(addr, b);
         }
 
         let db_file = OpenOptions::new()
@@ -40,15 +43,15 @@ impl State {
 
         let mut state = State {
             balances,
-            tx_mempool: vec![],
+            account_to_nonces: HashMap::new(),
             db_file: Arc::new(db_file.try_clone()?),
             latest_block: Block {
                 header: BlockHeader {
                     parent: [0; 32],
                     number: 0,
-                    nonce: 0, //TODO: today is this correct
+                    nonce: 0, //TODO: is this correct
                     time: 0,
-                    miner: "".to_string(),
+                    miner: Address::ZERO, //TODO: is this correct
                 },
                 txs: vec![],
             },
@@ -105,6 +108,13 @@ impl State {
         }
         self.latest_block.header.number + 1
     }
+
+    pub fn next_account_nonce(&self, account: Address) -> u64 {
+        self.account_to_nonces
+            .get(&account)
+            .map(|n| n + 1)
+            .unwrap_or(1)
+    }
 }
 
 pub fn apply_block(state: &mut State, b: Block) -> Result<(), BoxError> {
@@ -143,22 +153,17 @@ pub fn apply_block(state: &mut State, b: Block) -> Result<(), BoxError> {
     Ok(())
 }
 
-pub fn apply_txs(state: &mut State, txs: Vec<Tx>) -> Result<(), BoxError> {
+pub fn apply_txs(state: &mut State, mut txs: Vec<SignedTx>) -> Result<(), BoxError> {
+    txs.sort_by_key(|item| item.tx.time);
     for tx in txs {
         apply_tx(state, tx)?;
     }
     Ok(())
 }
 
-pub fn apply_tx(state: &mut State, tx: Tx) -> Result<(), BoxError> {
-    if tx.is_reward() {
-        state
-            .balances
-            .entry(tx.to)
-            .and_modify(|b| *b += tx.value)
-            .or_insert(tx.value);
-        return Ok(());
-    }
+pub fn apply_tx(state: &mut State, signed_tx: SignedTx) -> Result<(), BoxError> {
+    signed_tx.is_authentic()?;
+    let tx = signed_tx.tx;
 
     if let Some(b) = state.balances.get_mut(&tx.from) {
         if *b < tx.value {
@@ -173,5 +178,8 @@ pub fn apply_tx(state: &mut State, tx: Tx) -> Result<(), BoxError> {
         .entry(tx.to)
         .and_modify(|b| *b += tx.value)
         .or_insert(tx.value);
+
+    state.account_to_nonces.insert(tx.from, tx.nonce);
+
     Ok(())
 }

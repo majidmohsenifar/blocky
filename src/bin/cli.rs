@@ -1,6 +1,5 @@
 use blocky::cmd::{
     balance::{BalanceCommand, BalanceCommandArgs},
-    migrate::{MigrateCommand, MigrateCommandArgs},
     node::{NodeCommand, NodeCommandArgs},
     version::{VersionCommand, VersionCommandArgs},
     wallet::{WalletCommand, WalletCommandArgs},
@@ -22,7 +21,6 @@ enum Command {
     Version(VersionCommandArgs),
     Balance(BalanceCommandArgs),
     Node(NodeCommandArgs),
-    Migrate(MigrateCommandArgs),
     #[command(subcommand)]
     Wallet(WalletCmd),
 }
@@ -54,10 +52,6 @@ async fn main() {
             }
             Command::Node(args) => {
                 let cmd = NodeCommand::new();
-                cmd.run(args).await;
-            }
-            Command::Migrate(args) => {
-                let cmd = MigrateCommand::new();
                 cmd.run(args).await;
             }
             Command::Wallet(wallet_cmd) => match wallet_cmd {

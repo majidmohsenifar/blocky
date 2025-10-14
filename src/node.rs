@@ -3,9 +3,11 @@ use crate::{
     block::{Block, Hash, hash_from_hex, hash_to_hex},
     database,
     miner::{self, PendingBlock},
-    state::State as BlockchainState,
-    tx::{Account, Tx},
+    state::{self, State as BlockchainState},
+    tx::{SignedTx, Tx},
+    wallet,
 };
+use alloy::primitives::Address;
 use axum::{
     Json, Router,
     extract::{Query, Request, State},
@@ -15,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::str::FromStr;
 use std::{collections::HashMap, future, sync::Arc};
 use tokio::{
     io,
@@ -27,22 +30,17 @@ use tokio_util::sync::CancellationToken;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 
-// pub type SharedState = Arc<RwLock<AppState>>;
-
 #[derive(Clone)]
 pub struct AxumAppState {
-    pub node: SharedNode,
+    pub node: Node,
 }
-
-#[derive(Clone)]
-pub struct SharedNode(Arc<RwLock<Node>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerNode {
     pub ip: String,
     pub port: u16,
     pub is_bootstrap: bool,
-    pub account: Account,
+    pub account: Address,
     // Whenever my node already established connection, sync with this Peer
     pub connected: bool,
 }
@@ -52,7 +50,7 @@ impl PeerNode {
         ip: String,
         port: u16,
         is_bootstrap: bool,
-        account: Account,
+        account: Address,
         connected: bool,
     ) -> Self {
         Self {
@@ -75,84 +73,108 @@ pub struct HttpServer {
     axum_app_state: AxumAppState,
 }
 
+#[derive(Clone)]
 pub struct Node {
-    state: BlockchainState,
+    state: Arc<RwLock<BlockchainState>>,
+    pending_state: Arc<RwLock<BlockchainState>>,
     info: PeerNode,
     data_dir: String,
     ip: String,
     port: u16,
-    known_peers: HashMap<String, PeerNode>,
-    pending_txs: HashMap<String, Tx>,
-    archived_txs: HashMap<String, Tx>,
-    new_pending_txs: mpsc::Sender<Tx>,
-    new_synced_blocks_sender: mpsc::Sender<Block>,
-    new_synced_blocks_receiver: mpsc::Receiver<Block>,
-    is_mining: bool,
+    known_peers: Arc<RwLock<HashMap<String, PeerNode>>>,
+    pending_txs: Arc<RwLock<HashMap<String, SignedTx>>>,
+    archived_txs: Arc<RwLock<HashMap<String, SignedTx>>>,
+    new_pending_txs: Arc<RwLock<mpsc::Sender<SignedTx>>>,
+    new_synced_blocks_sender: Arc<RwLock<mpsc::Sender<Block>>>,
+    new_synced_blocks_receiver: Arc<RwLock<mpsc::Receiver<Block>>>,
+    is_mining: Arc<RwLock<bool>>,
 }
 
 impl Node {
     #[allow(clippy::too_many_arguments)]
-    pub fn new_shared_node(
+    pub fn new(
         state: BlockchainState,
         data_dir: String,
         ip: String,
         port: u16,
-        account: Account,
+        account: Address,
         bootstrap: PeerNode,
-        pending_tx_sender: mpsc::Sender<Tx>,
+        pending_tx_sender: mpsc::Sender<SignedTx>,
         new_synced_blocks_sender: mpsc::Sender<Block>,
         new_synced_blocks_receiver: mpsc::Receiver<Block>,
-    ) -> SharedNode {
-        SharedNode(Arc::new(RwLock::new(Node {
-            state,
+    ) -> Self {
+        let pending_state = state.clone();
+        Self {
+            state: Arc::new(RwLock::new(state)),
+            pending_state: Arc::new(RwLock::new(pending_state)),
             info: PeerNode::new(ip.clone(), port, false, account, true),
             data_dir,
             ip,
             port,
-            known_peers: HashMap::from([(bootstrap.tcp_addr(), bootstrap)]),
-            pending_txs: HashMap::new(),
-            archived_txs: HashMap::new(),
-            new_pending_txs: pending_tx_sender,
-            new_synced_blocks_sender,
-            new_synced_blocks_receiver,
-            is_mining: false,
-        })))
+            known_peers: Arc::new(RwLock::new(HashMap::from([(
+                bootstrap.tcp_addr(),
+                bootstrap,
+            )]))),
+            pending_txs: Arc::new(RwLock::new(HashMap::new())),
+            archived_txs: Arc::new(RwLock::new(HashMap::new())),
+            new_pending_txs: Arc::new(RwLock::new(pending_tx_sender)),
+            new_synced_blocks_sender: Arc::new(RwLock::new(new_synced_blocks_sender)),
+            new_synced_blocks_receiver: Arc::new(RwLock::new(new_synced_blocks_receiver)),
+            is_mining: Arc::new(RwLock::new(false)),
+        }
     }
 
     pub async fn mine_pending_txs(
         &mut self,
         cancellation_token: CancellationToken,
     ) -> Result<(), BoxError> {
+        let pending_txs = self.pending_txs.read().await;
+
+        let state = self.state.read().await;
         let block_to_mine = PendingBlock::new(
-            self.state.latest_block_hash(),
-            self.state.next_block_number(),
+            state.latest_block_hash(),
+            state.next_block_number(),
             self.info.account.clone(),
-            self.pending_txs.values().cloned().collect(),
+            pending_txs.values().cloned().collect(),
         );
+        drop(pending_txs);
+        drop(state);
+
         let mined_block = miner::mine(cancellation_token, block_to_mine).await?;
         self.remove_mined_pending_txs(&mined_block).await;
-        self.state.add_block(mined_block)?;
+        let mut state = self.state.write().await;
+        state.add_block(mined_block)?;
         Ok(())
     }
 
     pub async fn remove_mined_pending_txs(&mut self, b: &Block) {
+        let mut pending_txs = self.pending_txs.write().await;
+        let mut archived_txs = self.archived_txs.write().await;
         b.txs.iter().for_each(|tx| {
             let key = hex::encode(tx.hash().unwrap()); //if we are here the tx_hash is valid, so unwrap is safe
-            let removed_tx = self.pending_txs.remove(&key);
+            let removed_tx = pending_txs.remove(&key);
             if let Some(r_tx) = removed_tx {
-                self.archived_txs.insert(key, r_tx);
+                archived_txs.insert(key, r_tx);
             }
         });
     }
-}
 
-impl SharedNode {
+    pub async fn validate_tx_before_adding_to_mempool(
+        &mut self,
+        tx: SignedTx,
+    ) -> Result<(), BoxError> {
+        let mut pending_state = self.pending_state.write().await;
+        state::apply_tx(&mut pending_state, tx)
+    }
+
     pub async fn sync(self) {
-        let mut shared_node = self.0.write().await;
-        let peers: Vec<_> = shared_node.known_peers.values().cloned().collect();
+        // let mut shared_node = self.0.write().await;
+        let known_peers = self.known_peers.read().await;
+        let peers: Vec<_> = known_peers.values().cloned().collect();
+        drop(known_peers);
         let mut faulty_nodes = vec![];
         for peer in &peers {
-            if peer.ip == shared_node.ip && peer.port == shared_node.port {
+            if peer.ip == self.ip && peer.port == self.port {
                 continue;
             }
             let peer_status_res = match self.query_peer_status(peer).await {
@@ -194,12 +216,13 @@ impl SharedNode {
                 });
         }
 
+        let mut known_peers = self.known_peers.write().await;
         for n in faulty_nodes {
-            shared_node.known_peers.remove(&n.tcp_addr());
+            known_peers.remove(&n.tcp_addr());
         }
     }
 
-    pub async fn sync_pending_txs(&self, pending_txs: Vec<Tx>) -> Result<(), BoxError> {
+    pub async fn sync_pending_txs(&self, pending_txs: Vec<SignedTx>) -> Result<(), BoxError> {
         for tx in pending_txs {
             self.add_pending_tx(tx).await?;
         }
@@ -224,15 +247,13 @@ impl SharedNode {
             return Ok(());
         }
 
-        let mut shared_node = self.0.write().await;
-
         let client = reqwest::Client::new();
         let response = client
             .get(format!(
                 "http://{}/node/peer?ip={}&port={}",
                 peer_node.tcp_addr(),
-                shared_node.ip,
-                shared_node.port
+                self.ip,
+                self.port
             ))
             .timeout(Duration::from_secs(5))
             .send()
@@ -242,10 +263,8 @@ impl SharedNode {
         let _: AddPeerRes = serde_json::from_slice(&bytes)?;
 
         //we are sure it exist, because we send it to this fn in caller one
-        let k_p = shared_node
-            .known_peers
-            .get_mut(&peer_node.tcp_addr())
-            .unwrap();
+        let mut known_peers = self.known_peers.write().await;
+        let k_p = known_peers.get_mut(&peer_node.tcp_addr()).unwrap();
         k_p.connected = true;
         let k_p_cloned = k_p.clone();
         let _ = self.add_peer(&k_p_cloned).await;
@@ -260,32 +279,35 @@ impl SharedNode {
         if status_res.block_hash == [0; 32] {
             return Ok(());
         }
+        let state = self.state.read().await;
 
-        let mut shared_node = self.0.write().await;
-        if status_res.block_number < shared_node.state.latest_block.header.number {
+        if status_res.block_number < state.latest_block.header.number {
             return Ok(());
         }
         // If it's the genesis block and we already synced it, ignore it
-        if status_res.block_number == 0 && shared_node.state.latest_block_hash() != [0; 32] {
+        if status_res.block_number == 0 && state.latest_block_hash() != [0; 32] {
             return Ok(());
         }
 
         let client = reqwest::Client::new();
 
-        let response = client
-            .get(format!(
-                "http://{}/node/sync?from_block={}",
-                peer_node.tcp_addr(),
-                hex::encode(shared_node.state.latest_block_hash())
-            ))
-            .send()
-            .await?;
+        let req = client.get(format!(
+            "http://{}/node/sync?from_block={}",
+            peer_node.tcp_addr(),
+            hex::encode(state.latest_block_hash())
+        ));
+
+        drop(state);
+
+        let response = req.send().await?;
 
         let bytes = response.bytes().await?;
         let res: SyncRes = serde_json::from_slice(&bytes)?;
+        let mut state = self.state.write().await;
+        let new_synced_blocks_sender = self.new_synced_blocks_sender.read().await;
         for b in res.blocks {
-            shared_node.state.add_block(b.clone())?;
-            shared_node.new_synced_blocks_sender.send(b).await?;
+            state.add_block(b.clone())?;
+            new_synced_blocks_sender.send(b).await?;
         }
         Ok(())
     }
@@ -298,10 +320,9 @@ impl SharedNode {
     }
 
     pub async fn add_peer(&self, peer_node: &PeerNode) -> Result<(), BoxError> {
-        self.0
+        self.known_peers
             .write()
             .await
-            .known_peers
             .insert(peer_node.tcp_addr(), peer_node.clone());
         Ok(())
     }
@@ -310,19 +331,20 @@ impl SharedNode {
         let mut mining_interval = interval(Duration::from_secs(10));
         loop {
             let mining_cancellation_token = CancellationToken::new();
-            let mut shared_node = self.0.write().await;
+            let mut new_synced_blocks_receiver = self.new_synced_blocks_receiver.write().await;
             select! {
             biased;
                 _ = cancellation_token.cancelled() => {
                     break;
                 }
 
-                block = shared_node.new_synced_blocks_receiver.recv() =>{
+                block = new_synced_blocks_receiver.recv() =>{
                 match block{
                         Some(b)=>{
-                            if shared_node.is_mining{
+                            let mut self_clone = self.clone();
+                            if *self.is_mining.read().await{
                                 println!("another peer mined faster");
-                                shared_node.remove_mined_pending_txs(&b).await;
+                                self_clone.remove_mined_pending_txs(&b).await;
                                 mining_cancellation_token.cancel();
                             }
 
@@ -333,25 +355,28 @@ impl SharedNode {
                     }
                 }
                 _ = mining_interval.tick() => {
-                    let self_clone = self.clone();
-                    let second_self_clone = self.clone();
+                    let mut self_clone = self.clone();
                     let cancellation_token_cloned = cancellation_token.clone();
                     tokio::spawn(async move {
-                        let mut shared_node = self_clone.0.write().await;
-                        if !shared_node.pending_txs.is_empty()  && !shared_node.is_mining {
-                        shared_node.is_mining = true;
+                        let state= self_clone.state.read().await;
+                        let pending_txs = self_clone.pending_txs.read().await;
+                        let mut is_mining = self_clone.is_mining.write().await;
+                        if !pending_txs.is_empty()  && !*is_mining {
+                                *is_mining = true;
                         let block_to_mine = PendingBlock::new(
-                                shared_node.state.latest_block_hash(),
-                                shared_node.state.next_block_number(),
-                                shared_node.info.account.clone(),
-                                shared_node.pending_txs.values().cloned().collect(),
+                                state.latest_block_hash(),
+                                state.next_block_number(),
+                                self_clone.info.account,
+                                pending_txs.values().cloned().collect(),
                         );
-                        drop(shared_node);
+                        drop(state);
+                        drop(is_mining);
+                        drop(pending_txs);
                         let mined_block = miner::mine(cancellation_token_cloned, block_to_mine).await.unwrap();
-                        let mut shared_node = second_self_clone.0.write().await;
-                        shared_node.remove_mined_pending_txs(&mined_block).await;
-                        shared_node.state.add_block(mined_block).unwrap();
-                        shared_node.is_mining=false;
+                        self_clone.remove_mined_pending_txs(&mined_block).await;
+                        let mut state = self_clone.state.write().await;
+                        state.add_block(mined_block).unwrap();
+                        *self_clone.is_mining.write().await=false;
                         }
                    });
                 }
@@ -361,25 +386,30 @@ impl SharedNode {
         Ok(())
     }
 
-    pub async fn add_pending_tx(&self, tx: Tx) -> Result<(), BoxError> {
-        let mut shared_node = self.0.write().await;
-        let tx_hash = hex::encode(tx.hash()?);
-        if !shared_node.pending_txs.contains_key(&tx_hash)
-            && !shared_node.archived_txs.contains_key(&tx_hash)
-        {
-            shared_node.pending_txs.insert(tx_hash, tx.clone());
-            shared_node.new_pending_txs.send(tx).await?;
+    pub async fn add_pending_tx(&self, tx: SignedTx) -> Result<(), BoxError> {
+        let tx_hash = hex::encode(tx.tx.hash()?);
+
+        let mut self_clone = self.clone();
+        self_clone
+            .validate_tx_before_adding_to_mempool(tx.clone())
+            .await?;
+
+        let mut pending_txs = self.pending_txs.write().await;
+        let archived_txs = self.archived_txs.read().await;
+        let new_pending_txs = self.new_pending_txs.write().await;
+        if !pending_txs.contains_key(&tx_hash) && !archived_txs.contains_key(&tx_hash) {
+            pending_txs.insert(tx_hash, tx.clone());
+            new_pending_txs.send(tx).await?;
         }
         Ok(())
     }
 }
 
 impl HttpServer {
-    pub async fn build(node: SharedNode) -> Self {
-        let listener =
-            tokio::net::TcpListener::bind(format!("127.0.0.1:{}", node.0.read().await.port))
-                .await
-                .unwrap();
+    pub async fn build(node: Node) -> Self {
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", node.port))
+            .await
+            .unwrap();
 
         let node_for_sync = node.clone();
         let node_for_mine = node.clone();
@@ -404,7 +434,7 @@ impl HttpServer {
         }
     }
     pub async fn port(&self) -> u16 {
-        self.axum_app_state.node.0.read().await.port
+        self.axum_app_state.node.port
     }
 
     pub async fn run(self) -> Result<(), io::Error> {
@@ -453,6 +483,15 @@ fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
         .into_response()
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct AddTxReq {
+    pub from: String,
+    pub from_pwd: String, //password of key_store
+    pub to: String,
+    pub value: u64,
+    pub data: String,
+}
+
 pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Err(_) => {
@@ -464,7 +503,7 @@ pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl Int
         }
         Ok(b) => b,
     };
-    let tx: Tx = match serde_json::from_slice(&body) {
+    let params: AddTxReq = match serde_json::from_slice(&body) {
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -475,7 +514,51 @@ pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl Int
         Ok(p) => p,
     };
 
-    match state.node.add_pending_tx(tx).await {
+    let from_address = match Address::from_str(&params.from) {
+        Ok(addr) => addr,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"message":format!("invalid request body: {}",e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let to_address = match Address::from_str(&params.to) {
+        Ok(addr) => addr,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"message":format!("invalid request body: {}",e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let node = state.node;
+    let state = node.state.read().await;
+    let nonce = state.next_block_number();
+
+    let tx = Tx::new(from_address, to_address, params.value, nonce, params.data);
+    let signed_tx = wallet::sign_tx_with_keystore_account(
+        tx,
+        &params.from_pwd,
+        &wallet::get_keystore_dir_path(&node.data_dir),
+    )
+    .await;
+
+    let signed_tx = match signed_tx {
+        Ok(s_tx) => s_tx,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"message":format!("invalid request body: {}",e)})),
+            )
+                .into_response();
+        }
+    };
+    match node.add_pending_tx(signed_tx).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "success":true }))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -486,9 +569,9 @@ pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl Int
 }
 
 pub async fn balances(State(state): State<AxumAppState>, _req: Request) -> impl IntoResponse {
-    let node = state.node.0.read().await;
-    let balances = node.state.balances.clone();
-    let latest_block_hash = node.state.latest_block_hash;
+    let blockchain_state = state.node.state.read().await;
+    let balances = blockchain_state.balances.clone();
+    let latest_block_hash = blockchain_state.latest_block_hash;
 
     (
         StatusCode::OK,
@@ -503,26 +586,28 @@ pub struct StatusRes {
     block_hash: Hash,
     block_number: u64,
     known_peers: Vec<PeerNode>,
-    pending_txs: Vec<Tx>,
+    pending_txs: Vec<SignedTx>,
 }
 
 pub async fn status(State(state): State<AxumAppState>, _req: Request) -> impl IntoResponse {
-    let node = state.node.0.read().await;
-    let latest_block = node.state.latest_block.clone();
-    let latest_block_hash = node.state.latest_block_hash;
+    let blockchain_state = state.node.state.read().await;
+    let latest_block = blockchain_state.latest_block.clone();
+    let latest_block_hash = blockchain_state.latest_block_hash;
+    let known_peers = state.node.known_peers.read().await;
+    let pending_txs = state.node.pending_txs.read().await;
 
     let res = StatusRes {
         block_hash: latest_block_hash,
         block_number: latest_block.header.number,
-        known_peers: node.known_peers.values().cloned().collect(),
-        pending_txs: node.pending_txs.values().cloned().collect(),
+        known_peers: known_peers.values().cloned().collect(),
+        pending_txs: pending_txs.values().cloned().collect(),
     };
 
     (StatusCode::OK, Json(res)).into_response()
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct SyncParams {
+pub struct SyncReq {
     #[serde(default)]
     pub from_block: String,
 }
@@ -533,7 +618,7 @@ pub struct SyncRes {
 }
 
 pub async fn sync(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
-    let params: Query<SyncParams> = match Query::try_from_uri(req.uri()) {
+    let params: Query<SyncReq> = match Query::try_from_uri(req.uri()) {
         Ok(p) => p,
         Err(_) => {
             return (
@@ -543,7 +628,6 @@ pub async fn sync(State(state): State<AxumAppState>, req: Request) -> impl IntoR
                 .into_response();
         }
     };
-    let node = state.node.0.read().await;
 
     let hash = hex::decode(params.0.from_block);
 
@@ -562,7 +646,7 @@ pub async fn sync(State(state): State<AxumAppState>, req: Request) -> impl IntoR
 
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&hash_vec);
-    let blocks = database::get_blocks_after(&node.data_dir, hash).await;
+    let blocks = database::get_blocks_after(&state.node.data_dir, hash).await;
     let blocks = match blocks {
         Ok(blocks) => blocks,
         Err(e) => {
@@ -604,6 +688,18 @@ pub async fn add_peer(State(state): State<AxumAppState>, req: Request) -> impl I
                 .into_response();
         }
     };
+    let miner = match Address::from_str(&params.0.miner) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!( {
+                    "message": format!("miner address is not valid: {}",e),
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let res = state
         .node
@@ -611,7 +707,7 @@ pub async fn add_peer(State(state): State<AxumAppState>, req: Request) -> impl I
             ip: params.0.ip,
             port: params.0.port,
             is_bootstrap: false,
-            account: params.0.miner,
+            account: miner,
             connected: true,
         })
         .await;

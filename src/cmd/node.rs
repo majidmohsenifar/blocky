@@ -1,4 +1,6 @@
+use alloy::primitives::Address;
 use clap::Parser;
+use std::str::FromStr;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -14,9 +16,15 @@ pub struct NodeCommandArgs {
     #[arg(short, long)]
     pub ip: String,
     #[arg(short, long)]
-    port: Option<u16>,
+    pub port: Option<u16>,
     #[arg(short, long)]
-    miner: String,
+    pub miner: String,
+    #[arg(long)]
+    pub bootstrap_account: String,
+    #[arg(long)]
+    pub bootstrap_ip: String,
+    #[arg(long)]
+    pub bootstrap_port: Option<u16>,
 }
 
 #[derive(Default)]
@@ -37,22 +45,22 @@ impl NodeCommand {
         };
         let port = args.port.unwrap_or(8083);
         let bootstrap_node = PeerNode::new(
-            "127.0.0.1".to_string(),
-            8083, //must be always the known one,
+            args.bootstrap_ip,
+            args.bootstrap_port.unwrap_or(8083), //must be always the known one,
             true,
-            "andrej".to_string(),
+            Address::from_str(&args.bootstrap_account).unwrap(),
             false,
         );
 
         let (pending_tx_sender, _pending_tx_receiver) = mpsc::channel(100);
         let (new_synced_blocks_sender, new_synced_blocks_receiver) = mpsc::channel(100);
 
-        let node = Node::new_shared_node(
+        let node = Node::new(
             state,
             args.data_dir,
             args.ip,
             port,
-            args.miner,
+            Address::from_str(&args.miner).unwrap(),
             bootstrap_node,
             pending_tx_sender,
             new_synced_blocks_sender,
