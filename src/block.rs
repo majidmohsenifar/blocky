@@ -85,7 +85,7 @@ impl Block {
 }
 
 pub fn is_block_hash_valid(hash: Hash) -> bool {
-    hash[..1].iter().all(|&byte| byte == 0)
+    hash[..2].iter().all(|&byte| byte == 0)
 }
 
 #[cfg(test)]

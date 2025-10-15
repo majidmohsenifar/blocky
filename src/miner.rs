@@ -39,7 +39,6 @@ pub async fn mine(
         return Err("mining empty blocks is not allowed".into());
     }
 
-    //TODO: today, what if we have new pending tx in the middle of mining
     let mut attempt = 0;
 
     loop {

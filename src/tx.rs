@@ -56,10 +56,11 @@ impl SignedTx {
     }
 
     pub fn is_authentic(&self) -> Result<(), BoxError> {
-        let tx_hash = self.tx.hash()?;
         let signature = Signature::from_raw(self.sig.as_slice())?;
 
-        let address = signature.recover_address_from_msg(tx_hash)?;
+        let tx_serialized = serde_json::to_vec(&self.tx)?;
+
+        let address = signature.recover_address_from_msg(tx_serialized)?;
 
         if self.tx.from != address {
             return Err("invalid signature".into());

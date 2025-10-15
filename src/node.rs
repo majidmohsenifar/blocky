@@ -18,7 +18,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::str::FromStr;
-use std::{collections::HashMap, future, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tokio::{
     io,
     net::TcpListener,
@@ -124,29 +124,6 @@ impl Node {
         }
     }
 
-    pub async fn mine_pending_txs(
-        &mut self,
-        cancellation_token: CancellationToken,
-    ) -> Result<(), BoxError> {
-        let pending_txs = self.pending_txs.read().await;
-
-        let state = self.state.read().await;
-        let block_to_mine = PendingBlock::new(
-            state.latest_block_hash(),
-            state.next_block_number(),
-            self.info.account.clone(),
-            pending_txs.values().cloned().collect(),
-        );
-        drop(pending_txs);
-        drop(state);
-
-        let mined_block = miner::mine(cancellation_token, block_to_mine).await?;
-        self.remove_mined_pending_txs(&mined_block).await;
-        let mut state = self.state.write().await;
-        state.add_block(mined_block)?;
-        Ok(())
-    }
-
     pub async fn remove_mined_pending_txs(&mut self, b: &Block) {
         let mut pending_txs = self.pending_txs.write().await;
         let mut archived_txs = self.archived_txs.write().await;
@@ -250,10 +227,11 @@ impl Node {
         let client = reqwest::Client::new();
         let response = client
             .get(format!(
-                "http://{}/node/peer?ip={}&port={}",
+                "http://{}/node/peer?ip={}&port={}&miner={}",
                 peer_node.tcp_addr(),
                 self.ip,
-                self.port
+                self.port,
+                self.info.account,
             ))
             .timeout(Duration::from_secs(5))
             .send()
@@ -267,6 +245,7 @@ impl Node {
         let k_p = known_peers.get_mut(&peer_node.tcp_addr()).unwrap();
         k_p.connected = true;
         let k_p_cloned = k_p.clone();
+        drop(known_peers);
         let _ = self.add_peer(&k_p_cloned).await;
         Ok(())
     }
@@ -304,11 +283,15 @@ impl Node {
         let bytes = response.bytes().await?;
         let res: SyncRes = serde_json::from_slice(&bytes)?;
         let mut state = self.state.write().await;
-        let new_synced_blocks_sender = self.new_synced_blocks_sender.read().await;
+        let new_synced_blocks_sender = self.new_synced_blocks_sender.write().await;
+        let mut pending_state = self.pending_state.write().await;
         for b in res.blocks {
             state.add_block(b.clone())?;
             new_synced_blocks_sender.send(b).await?;
+            let new_pending_state = state.clone();
+            *pending_state = new_pending_state;
         }
+
         Ok(())
     }
 
@@ -333,7 +316,6 @@ impl Node {
             let mining_cancellation_token = CancellationToken::new();
             let mut new_synced_blocks_receiver = self.new_synced_blocks_receiver.write().await;
             select! {
-            biased;
                 _ = cancellation_token.cancelled() => {
                     break;
                 }
@@ -376,18 +358,22 @@ impl Node {
                         self_clone.remove_mined_pending_txs(&mined_block).await;
                         let mut state = self_clone.state.write().await;
                         state.add_block(mined_block).unwrap();
+                        let new_pending_state = state.clone();
+                        drop(state);
+                        let mut pending_state = self_clone.pending_state.write().await;
+                        *pending_state = new_pending_state;
                         *self_clone.is_mining.write().await=false;
                         }
                    });
                 }
-                    _ = future::ready(()) => {}
+                    // _ = future::ready(()) => {}
             }
         }
         Ok(())
     }
 
     pub async fn add_pending_tx(&self, tx: SignedTx) -> Result<(), BoxError> {
-        let tx_hash = hex::encode(tx.tx.hash()?);
+        let tx_hash = hex::encode(tx.hash()?);
 
         let mut self_clone = self.clone();
         self_clone
@@ -416,7 +402,7 @@ impl HttpServer {
         tokio::spawn(async move {
             loop {
                 node_for_sync.clone().sync().await;
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
 
@@ -514,7 +500,7 @@ pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl Int
         Ok(p) => p,
     };
 
-    let from_address = match Address::from_str(&params.from) {
+    let from_address = match Address::from_str(&params.from.to_lowercase()) {
         Ok(addr) => addr,
         Err(e) => {
             return (
@@ -525,7 +511,7 @@ pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl Int
         }
     };
 
-    let to_address = match Address::from_str(&params.to) {
+    let to_address = match Address::from_str(&params.to.to_lowercase()) {
         Ok(addr) => addr,
         Err(e) => {
             return (

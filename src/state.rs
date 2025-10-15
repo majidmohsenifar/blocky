@@ -91,13 +91,6 @@ impl State {
         Ok(block_hash)
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Block>) -> Result<(), BoxError> {
-        for b in blocks {
-            self.add_block(b)?;
-        }
-        Ok(())
-    }
-
     pub fn latest_block_hash(&self) -> Hash {
         self.latest_block_hash
     }
@@ -165,12 +158,19 @@ pub fn apply_tx(state: &mut State, signed_tx: SignedTx) -> Result<(), BoxError> 
     signed_tx.is_authentic()?;
     let tx = signed_tx.tx;
 
+    println!("balances before tx: {:?}", state.balances);
+
     if let Some(b) = state.balances.get_mut(&tx.from) {
         if *b < tx.value {
+            println!(
+                "or here you mean b: {},v: {}, from {}",
+                &tx.from, *b, tx.value
+            );
             return Err("insufficient balance".into());
         }
         *b -= tx.value;
     } else {
+        println!("here you mean");
         return Err("insufficient balance".into());
     };
     state

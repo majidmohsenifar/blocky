@@ -40,8 +40,8 @@ pub async fn sign_tx_with_keystore_account(
     key_store_dir: &str,
 ) -> Result<SignedTx, BoxError> {
     let signer = LocalSigner::decrypt_keystore(key_store_dir, password)?;
-    let tx_vec = serde_json::to_vec(&tx)?;
-    let sig = signer.sign_message(tx_vec.as_slice()).await?;
+    let tx_serialized = serde_json::to_vec(&tx)?;
+    let sig = signer.sign_message(tx_serialized.as_slice()).await?;
 
     Ok(SignedTx {
         tx,
