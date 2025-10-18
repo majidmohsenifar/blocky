@@ -30,4 +30,6 @@ rand = "0.8"
 tokio-util = "0.7.16"
 rpassword = "7.4.0"
 alloy = { version = "1.0.38", features = ["signers","signer-keystore"] }
+utoipa = { version = "5.3", features= ["axum_extras", "uuid", "chrono"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 

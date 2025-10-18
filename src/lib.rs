@@ -3,6 +3,7 @@ pub mod cmd;
 pub mod database;
 pub mod fs;
 pub mod genesis;
+pub mod handler;
 pub mod miner;
 pub mod node;
 pub mod state;

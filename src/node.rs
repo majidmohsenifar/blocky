@@ -1,23 +1,23 @@
 use crate::{
     BoxError,
-    block::{Block, Hash, hash_from_hex, hash_to_hex},
-    database,
+    block::Block,
+    handler::{
+        self,
+        api::{AddPeerRes, StatusRes, SyncRes, add_peer, add_tx, balances, status, sync},
+    },
     miner::{self, PendingBlock},
     state::{self, State as BlockchainState},
-    tx::{SignedTx, Tx},
-    wallet,
+    tx::SignedTx,
 };
 use alloy::primitives::Address;
 use axum::{
     Json, Router,
-    extract::{Query, Request, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::str::FromStr;
 use std::{collections::HashMap, sync::Arc};
 use tokio::{
     io,
@@ -29,6 +29,26 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
+use utoipa::OpenApi;
+
+use utoipa_swagger_ui::SwaggerUi;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Blocky API",
+        version = "1.0.0",
+        description = "Blocky API",
+    ),
+    paths(
+        handler::api::add_tx,
+
+    ),
+tags(
+(name = "Blocky", description = "Blocky API")
+)
+)]
+struct ApiDoc;
 
 #[derive(Clone)]
 pub struct AxumAppState {
@@ -75,19 +95,19 @@ pub struct HttpServer {
 
 #[derive(Clone)]
 pub struct Node {
-    state: Arc<RwLock<BlockchainState>>,
-    pending_state: Arc<RwLock<BlockchainState>>,
-    info: PeerNode,
-    data_dir: String,
-    ip: String,
-    port: u16,
-    known_peers: Arc<RwLock<HashMap<String, PeerNode>>>,
-    pending_txs: Arc<RwLock<HashMap<String, SignedTx>>>,
-    archived_txs: Arc<RwLock<HashMap<String, SignedTx>>>,
-    new_pending_txs: Arc<RwLock<mpsc::Sender<SignedTx>>>,
-    new_synced_blocks_sender: Arc<RwLock<mpsc::Sender<Block>>>,
-    new_synced_blocks_receiver: Arc<RwLock<mpsc::Receiver<Block>>>,
-    is_mining: Arc<RwLock<bool>>,
+    pub state: Arc<RwLock<BlockchainState>>,
+    pub pending_state: Arc<RwLock<BlockchainState>>,
+    pub info: PeerNode,
+    pub data_dir: String,
+    pub ip: String,
+    pub port: u16,
+    pub known_peers: Arc<RwLock<HashMap<String, PeerNode>>>,
+    pub pending_txs: Arc<RwLock<HashMap<String, SignedTx>>>,
+    pub archived_txs: Arc<RwLock<HashMap<String, SignedTx>>>,
+    pub new_pending_txs: Arc<RwLock<mpsc::Sender<SignedTx>>>,
+    pub new_synced_blocks_sender: Arc<RwLock<mpsc::Sender<Block>>>,
+    pub new_synced_blocks_receiver: Arc<RwLock<mpsc::Receiver<Block>>>,
+    pub is_mining: Arc<RwLock<bool>>,
 }
 
 impl Node {
@@ -441,6 +461,7 @@ pub async fn get_router(axum_app_state: AxumAppState) -> Router {
         .route("/node/peer", get(add_peer));
 
     Router::new()
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .merge(routes)
         .layer(
             CorsLayer::new()
@@ -467,251 +488,4 @@ fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
         })),
     )
         .into_response()
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct AddTxReq {
-    pub from: String,
-    pub from_pwd: String, //password of key_store
-    pub to: String,
-    pub value: u64,
-    pub data: String,
-}
-
-pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
-    let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":"invalid request body"})),
-            )
-                .into_response();
-        }
-        Ok(b) => b,
-    };
-    let params: AddTxReq = match serde_json::from_slice(&body) {
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":format!("invalid request body: {}",e)})),
-            )
-                .into_response();
-        }
-        Ok(p) => p,
-    };
-
-    let from_address = match Address::from_str(&params.from.to_lowercase()) {
-        Ok(addr) => addr,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":format!("invalid request body: {}",e)})),
-            )
-                .into_response();
-        }
-    };
-
-    let to_address = match Address::from_str(&params.to.to_lowercase()) {
-        Ok(addr) => addr,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":format!("invalid request body: {}",e)})),
-            )
-                .into_response();
-        }
-    };
-
-    let node = state.node;
-    let state = node.state.read().await;
-    let nonce = state.next_block_number();
-
-    let tx = Tx::new(from_address, to_address, params.value, nonce, params.data);
-    let signed_tx = wallet::sign_tx_with_keystore_account(
-        tx,
-        &params.from_pwd,
-        &wallet::get_keystore_dir_path(&node.data_dir),
-    )
-    .await;
-
-    let signed_tx = match signed_tx {
-        Ok(s_tx) => s_tx,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":format!("invalid request body: {}",e)})),
-            )
-                .into_response();
-        }
-    };
-    match node.add_pending_tx(signed_tx).await {
-        Ok(_) => (StatusCode::OK, Json(json!({ "success":true }))).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "message":e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-pub async fn balances(State(state): State<AxumAppState>, _req: Request) -> impl IntoResponse {
-    let blockchain_state = state.node.state.read().await;
-    let balances = blockchain_state.balances.clone();
-    let latest_block_hash = blockchain_state.latest_block_hash;
-
-    (
-        StatusCode::OK,
-        Json(json!({ "hash":hex::encode(latest_block_hash),"balances":balances })),
-    )
-        .into_response()
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct StatusRes {
-    #[serde(serialize_with = "hash_to_hex", deserialize_with = "hash_from_hex")]
-    block_hash: Hash,
-    block_number: u64,
-    known_peers: Vec<PeerNode>,
-    pending_txs: Vec<SignedTx>,
-}
-
-pub async fn status(State(state): State<AxumAppState>, _req: Request) -> impl IntoResponse {
-    let blockchain_state = state.node.state.read().await;
-    let latest_block = blockchain_state.latest_block.clone();
-    let latest_block_hash = blockchain_state.latest_block_hash;
-    let known_peers = state.node.known_peers.read().await;
-    let pending_txs = state.node.pending_txs.read().await;
-
-    let res = StatusRes {
-        block_hash: latest_block_hash,
-        block_number: latest_block.header.number,
-        known_peers: known_peers.values().cloned().collect(),
-        pending_txs: pending_txs.values().cloned().collect(),
-    };
-
-    (StatusCode::OK, Json(res)).into_response()
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SyncReq {
-    #[serde(default)]
-    pub from_block: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SyncRes {
-    pub blocks: Vec<Block>,
-}
-
-pub async fn sync(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
-    let params: Query<SyncReq> = match Query::try_from_uri(req.uri()) {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":"invalid request params"})),
-            )
-                .into_response();
-        }
-    };
-
-    let hash = hex::decode(params.0.from_block);
-
-    let hash_vec = match hash {
-        Ok(hash) => hash,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!( {
-                    "message": "hash is not valid",
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_vec);
-    let blocks = database::get_blocks_after(&state.node.data_dir, hash).await;
-    let blocks = match blocks {
-        Ok(blocks) => blocks,
-        Err(e) => {
-            println!("cannot fetch blocks, err: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!( {
-                    "message": "something went wrong",
-                })),
-            )
-                .into_response();
-        }
-    };
-    (StatusCode::OK, Json(SyncRes { blocks })).into_response()
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct AddPeerParams {
-    #[serde(default)]
-    pub ip: String,
-    pub port: u16,
-    pub miner: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct AddPeerRes {
-    pub success: bool,
-    pub error: String,
-}
-
-pub async fn add_peer(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
-    let params: Query<AddPeerParams> = match Query::try_from_uri(req.uri()) {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"message":"invalid request params"})),
-            )
-                .into_response();
-        }
-    };
-    let miner = match Address::from_str(&params.0.miner) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!( {
-                    "message": format!("miner address is not valid: {}",e),
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let res = state
-        .node
-        .add_peer(&PeerNode {
-            ip: params.0.ip,
-            port: params.0.port,
-            is_bootstrap: false,
-            account: miner,
-            connected: true,
-        })
-        .await;
-    if let Err(e) = res {
-        println!("cannot add peer, err: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!( {
-                "message": "cannot add peer",
-            })),
-        )
-            .into_response();
-    }
-
-    let res = AddPeerRes {
-        success: true,
-        error: "".to_string(),
-    };
-
-    (StatusCode::OK, Json(res)).into_response()
 }
