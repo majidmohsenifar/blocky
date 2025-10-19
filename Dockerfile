@@ -1,11 +1,11 @@
 # =========================
 # 1️⃣  Build Stage
 # =========================
-FROM rust:1.81-slim AS builder
+FROM rust:1.89-slim AS builder
 
 # Install required tools (if you need OpenSSL, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev build-essential && \
+    curl pkg-config libssl-dev build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 # Set the working directory inside container
@@ -15,15 +15,15 @@ WORKDIR /app
 # Copy Cargo.toml and Cargo.lock separately to leverage Docker caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy project to cache dependencies
+# Pre-build dependencies only (dummy crate)
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release && rm -rf src
+RUN cargo build --release || true
 
 # Copy actual source code
 COPY . .
 
 # Build your actual app
-RUN cargo build --bin cli --release
+RUN cargo build --release --bin cli 
 
 # =========================
 # 2️⃣  Runtime Stage
@@ -43,5 +43,4 @@ RUN useradd -m node
 USER node
 
 # Start the app
-ENTRYPOINT ["/usr/local/bin/app"]
-
+ENTRYPOINT ["/usr/local/bin/app", "node"]
