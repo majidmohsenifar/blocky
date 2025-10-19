@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
+use utoipa::ToSchema;
 
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -42,6 +43,10 @@ use utoipa_swagger_ui::SwaggerUi;
     ),
     paths(
         handler::api::add_tx,
+        handler::api::balances,
+        handler::api::status,
+        // handler::api::sync,
+        // handler::api::add_peer,
 
     ),
 tags(
@@ -55,11 +60,12 @@ pub struct AxumAppState {
     pub node: Node,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PeerNode {
     pub ip: String,
     pub port: u16,
     pub is_bootstrap: bool,
+    #[schema(value_type = String)]
     pub account: Address,
     // Whenever my node already established connection, sync with this Peer
     pub connected: bool,

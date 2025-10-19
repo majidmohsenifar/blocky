@@ -4,6 +4,7 @@ use alloy::primitives::Address;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
+use utoipa::ToSchema;
 
 pub type Hash = [u8; 32];
 pub const BLOCK_REWARD: u64 = 100;
@@ -15,14 +16,16 @@ pub struct BlockFs {
     pub value: Block,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BlockHeader {
     #[serde(serialize_with = "hash_to_hex", deserialize_with = "hash_from_hex")]
+    #[schema(value_type = String)]
     pub parent: Hash,
     #[serde(default)]
     pub number: u64,
     pub nonce: u32,
     pub time: u64,
+    #[schema(value_type = String)]
     pub miner: Address,
 }
 
@@ -49,7 +52,7 @@ where
     Ok(hash)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Block {
     pub header: BlockHeader,
     #[serde(rename = "payload")]

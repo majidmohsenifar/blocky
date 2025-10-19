@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ErrorRes {
@@ -46,7 +46,6 @@ pub struct AddTxRes {
         ),
         request_body = AddTxReq,
 )]
-
 pub async fn add_tx(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Err(e) => {
@@ -142,6 +141,13 @@ pub struct BalancesRes {
     pub balances: HashMap<Address, u64>,
 }
 
+#[utoipa::path(
+        get,
+        path = "/balances/list",
+        responses(
+            (status = OK, description = "", body = BalancesRes),
+        ),
+)]
 pub async fn balances(State(state): State<AxumAppState>, _req: Request) -> impl IntoResponse {
     let blockchain_state = state.node.state.read().await;
     let balances = blockchain_state.balances.clone();
@@ -157,15 +163,23 @@ pub async fn balances(State(state): State<AxumAppState>, _req: Request) -> impl 
         .into_response()
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct StatusRes {
     #[serde(serialize_with = "hash_to_hex", deserialize_with = "hash_from_hex")]
+    #[schema(value_type = String)]
     pub block_hash: Hash,
     pub block_number: u64,
     pub known_peers: Vec<PeerNode>,
     pub pending_txs: Vec<SignedTx>,
 }
 
+#[utoipa::path(
+        get,
+        path = "/status",
+        responses(
+            (status = OK, description = "", body = StatusRes),
+        ),
+)]
 pub async fn status(State(state): State<AxumAppState>, _req: Request) -> impl IntoResponse {
     let blockchain_state = state.node.state.read().await;
     let latest_block = blockchain_state.latest_block.clone();
@@ -183,17 +197,30 @@ pub async fn status(State(state): State<AxumAppState>, _req: Request) -> impl In
     (StatusCode::OK, Json(res)).into_response()
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SyncReq {
     #[serde(default)]
     pub from_block: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct SyncRes {
     pub blocks: Vec<Block>,
 }
 
+#[utoipa::path(
+        get,
+        path = "/node/sync",
+        responses(
+            (status = OK, description = "", body = SyncRes),
+            (status = BAD_REQUEST, body = ErrorRes),
+            (status = INTERNAL_SERVER_ERROR, body = ErrorRes, description = "something went wrong in server"),
+        ),
+        params(
+            SyncReq,
+        ),
+)]
 pub async fn sync(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
     let params: Query<SyncReq> = match Query::try_from_uri(req.uri()) {
         Ok(p) => p,
@@ -241,22 +268,35 @@ pub async fn sync(State(state): State<AxumAppState>, req: Request) -> impl IntoR
     (StatusCode::OK, Json(SyncRes { blocks })).into_response()
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct AddPeerParams {
+#[derive(Serialize, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct AddPeerReq {
     #[serde(default)]
     pub ip: String,
     pub port: u16,
     pub miner: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct AddPeerRes {
     pub success: bool,
     pub error: String,
 }
 
+#[utoipa::path(
+        get,
+        path = "/node/peer",
+        responses(
+            (status = OK, description = "", body = AddPeerRes),
+            (status = BAD_REQUEST, body = ErrorRes),
+            (status = INTERNAL_SERVER_ERROR, body = ErrorRes, description = "something went wrong in server"),
+        ),
+        params(
+            AddPeerReq,
+        ),
+)]
 pub async fn add_peer(State(state): State<AxumAppState>, req: Request) -> impl IntoResponse {
-    let params: Query<AddPeerParams> = match Query::try_from_uri(req.uri()) {
+    let params: Query<AddPeerReq> = match Query::try_from_uri(req.uri()) {
         Ok(p) => p,
         Err(e) => {
             return (

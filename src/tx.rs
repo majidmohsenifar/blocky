@@ -4,10 +4,13 @@ use axum::BoxError;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Tx {
+    #[schema(value_type = String)]
     pub from: Address,
+    #[schema(value_type = String)]
     pub to: Address,
     pub value: u64,
     pub nonce: u64,
@@ -15,7 +18,7 @@ pub struct Tx {
     pub time: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SignedTx {
     pub tx: Tx,
     pub sig: Vec<u8>,
