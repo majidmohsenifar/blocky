@@ -419,7 +419,7 @@ impl Node {
 
 impl HttpServer {
     pub async fn build(node: Node) -> Self {
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", node.port))
+        let listener = tokio::net::TcpListener::bind(format!("{}:{}", node.ip, node.port))
             .await
             .unwrap();
 
