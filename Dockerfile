@@ -42,5 +42,3 @@ COPY --from=builder /app/target/release/cli /usr/local/bin/app
 RUN useradd -m node
 USER node
 
-# Start the app
-ENTRYPOINT ["/usr/local/bin/app", "node"]
